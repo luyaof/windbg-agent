@@ -43,6 +43,7 @@ add_library(windbg_agent SHARED
     windbg_client.cpp
     http_server.cpp
     mcp_server.cpp
+    ws_client.cpp
 )
 
 # Module definition file: forces undecorated export names on Win32 (x86)
@@ -102,30 +103,30 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/repro/CMakeLists.txt")
 endif()
 
 # ============================================================================
-# HTTP server CLI executable (disabled — source stays in cli/ for future use)
+# HTTP server CLI executable
 # ============================================================================
-# add_executable(windbg_agent_cli
-#     cli/main.cpp
-#     settings.cpp
-# )
-#
-# target_include_directories(windbg_agent_cli PRIVATE
-#     ${cpp_httplib_SOURCE_DIR}
-#     ${CMAKE_CURRENT_SOURCE_DIR}
-#     ${CMAKE_CURRENT_BINARY_DIR}
-# )
-#
-# target_link_libraries(windbg_agent_cli PRIVATE
-#     libagents
-#     nlohmann_json::nlohmann_json
-#     ws2_32
-# )
-#
-# set_target_properties(windbg_agent_cli PROPERTIES
-#     OUTPUT_NAME "windbg_agent"
-# )
-#
-# set_target_properties(windbg_agent_cli PROPERTIES
-#     MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
-# )
+add_executable(windbg_agent_cli
+    cli/main.cpp
+    settings.cpp
+)
+
+target_include_directories(windbg_agent_cli PRIVATE
+    ${cpp_httplib_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+target_link_libraries(windbg_agent_cli PRIVATE
+    libagents
+    nlohmann_json::nlohmann_json
+    ws2_32
+)
+
+set_target_properties(windbg_agent_cli PROPERTIES
+    OUTPUT_NAME "windbg_agent"
+)
+
+set_target_properties(windbg_agent_cli PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+)
 

@@ -9,6 +9,7 @@
 
 #include "http_server.hpp"
 #include "mcp_server.hpp"
+#include "ws_client.hpp"
 #include "session_store.hpp"
 #include "settings.hpp"
 #include "system_prompt.hpp"
@@ -386,6 +387,7 @@ HRESULT CALLBACK agent_impl(PDEBUG_CLIENT Client, PCSTR Args)
             "  timeout <ms>          Set response timeout (e.g., 120000 = 2 min)\n"
             "  http [bind_addr]      Start HTTP server for external tools (port auto-assigned)\n"
             "  mcp [bind_addr]       Start MCP server for MCP-compatible clients\n"
+            "  connect <ws_url>      Connect to WebSocket reverse proxy server\n"
             "  byok                  Show BYOK (Bring Your Own Key) status\n"
             "  byok enable|disable   Enable or disable BYOK for current provider\n"
             "  byok key <value>      Set BYOK API key\n"
@@ -975,6 +977,149 @@ HRESULT CALLBACK agent_impl(PDEBUG_CLIENT Client, PCSTR Args)
         // Block until server stops (user presses Ctrl+C)
         mcp_server.wait();
         control->Output(DEBUG_OUTPUT_NORMAL, "MCP server stopped.\n");
+    }
+    else if (subcmd == "connect")
+    {
+        // Connect to external WebSocket reverse proxy server
+        // Usage: !agent connect <ws_url>
+        // Example: !agent connect ws://proxy.example.com:8080/windbg
+        if (rest.empty())
+        {
+            control->Output(DEBUG_OUTPUT_ERROR,
+                "Error: WebSocket URL required\n"
+                "Usage: !agent connect ws://host:port/path\n");
+            control->Release();
+            return E_FAIL;
+        }
+
+        windbg_agent::WinDbgClient dbg_client(Client);
+        auto settings = windbg_agent::LoadSettings();
+        auto& session = GetAgentSession();
+        std::string target = dbg_client.GetTargetName();
+
+        // Parse WebSocket URL
+        std::string ws_url = rest;
+        {
+            size_t url_start = ws_url.find_first_not_of(" \t");
+            size_t url_end = ws_url.find_last_not_of(" \t");
+            if (url_start != std::string::npos)
+                ws_url = ws_url.substr(url_start, url_end - url_start + 1);
+        }
+
+        if (ws_url.substr(0, 5) != "ws://" && ws_url.substr(0, 6) != "wss://")
+        {
+            control->Output(DEBUG_OUTPUT_ERROR,
+                "Error: URL must start with ws:// or wss://\n");
+            control->Release();
+            return E_FAIL;
+        }
+
+        // Get target state
+        std::string state = dbg_client.GetTargetState();
+        ULONG pid = dbg_client.GetProcessId();
+
+        // Create exec callback - executes debugger commands
+        windbg_agent::ExecCallback exec_cb = [&dbg_client](const std::string& command) -> std::string
+        {
+            return dbg_client.ExecuteCommand(command);
+        };
+
+        // Create ask callback - routes through same AI path as !agent ask
+        windbg_agent::AskCallback ask_cb = [Client, &settings, &session, &dbg_client,
+                                              &target](const std::string& query) -> std::string
+        {
+            auto runtime_ctx = GatherRuntimeContext(dbg_client);
+            std::string error;
+            bool created = false;
+            if (!EnsureAgent(session, dbg_client, settings, target, runtime_ctx, &error, &created))
+            {
+                return error.empty() ? "Failed to initialize agent" : error;
+            }
+
+            try
+            {
+                std::string message =
+                    session.primed || session.system_prompt.empty()
+                        ? query
+                        : (session.system_prompt + "\n\n---\n\n" + query);
+
+                std::string response = session.agent->query_hosted(message, session.host);
+                session.primed = true;
+
+#if !WINDBG_AGENT_DISABLE_SESSIONS
+                const auto* byok_save = settings.get_byok();
+                if (!(byok_save && byok_save->is_usable()))
+                {
+                    std::string new_session_id = session.agent->get_session_id();
+                    std::string provider_name =
+                        libagents::provider_type_name(settings.default_provider);
+                    if (!new_session_id.empty() && new_session_id != session.session_id)
+                    {
+                        windbg_agent::GetSessionStore().SetSessionId(target, provider_name,
+                                                                       new_session_id);
+                        session.session_id = new_session_id;
+                    }
+                }
+#endif
+                return response;
+            }
+            catch (const std::exception& e)
+            {
+                return std::string("Error: ") + e.what();
+            }
+        };
+
+        // Create break callback - interrupts currently running debugger command (thread-safe)
+        windbg_agent::BreakCallback break_cb = [&dbg_client]()
+        {
+            dbg_client.SetInterrupt();
+        };
+
+        // Create and connect WebSocket client
+        static windbg_agent::WsClient ws_client;
+        if (ws_client.is_connected())
+        {
+            control->Output(DEBUG_OUTPUT_ERROR,
+                            "WebSocket already connected. Disconnect first or press Ctrl+C.\n");
+            control->Release();
+            return E_FAIL;
+        }
+
+        control->Output(DEBUG_OUTPUT_NORMAL, "Connecting to %s...\n", ws_url.c_str());
+
+        if (!ws_client.connect(ws_url, exec_cb, ask_cb, break_cb))
+        {
+            control->Output(DEBUG_OUTPUT_ERROR,
+                            "Failed to connect to %s\n", ws_url.c_str());
+            control->Release();
+            return E_FAIL;
+        }
+
+        // Set session context for help/get_context responses
+        windbg_agent::SessionContext ctx;
+        ctx.target_name = target;
+        ctx.target_arch = dbg_client.GetTargetArchitecture();
+        ctx.debugger_type = dbg_client.GetDebuggerType();
+        ctx.target_state = state;
+        ctx.pid = pid;
+        ctx.version = WINDBG_AGENT_VERSION;
+        ws_client.set_session_context(ctx);
+
+        // Format and output connection info
+        std::string ws_info =
+            windbg_agent::format_ws_info(target, pid, state, ws_url);
+        control->Output(DEBUG_OUTPUT_NORMAL, "%s\n", ws_info.c_str());
+
+        control->Output(DEBUG_OUTPUT_NORMAL, "Press Ctrl+C to disconnect.\n");
+
+        // Set up interrupt check - disconnect when user presses Ctrl+C
+        ws_client.set_interrupt_check([&dbg_client]() {
+            return dbg_client.IsInterrupted();
+        });
+
+        // Block until disconnected (user presses Ctrl+C or server disconnects)
+        ws_client.wait();
+        control->Output(DEBUG_OUTPUT_NORMAL, "WebSocket disconnected.\n");
     }
     else if (subcmd == "ask")
     {
