@@ -14,6 +14,7 @@ namespace windbg_agent {
 // Callbacks for handling requests
 using ExecCallback = std::function<std::string(const std::string& command)>;
 using AskCallback = std::function<std::string(const std::string& query)>;
+using BreakCallback = std::function<void()>;
 
 // Internal command structure for cross-thread execution
 struct PendingCommand {
@@ -43,8 +44,10 @@ public:
     // Start server with OS-assigned port
     // Returns actual port used
     // Callbacks will be called on the main thread (in wait())
+    // break_cb is called directly on the HTTP thread (not queued) to interrupt running commands
     // bind_addr: "127.0.0.1" for localhost only, "0.0.0.0" for all interfaces
     int start(ExecCallback exec_cb, AskCallback ask_cb,
+              BreakCallback break_cb = nullptr,
               const std::string& bind_addr = "127.0.0.1");
 
     // Block until server stops, processing commands on the calling thread
@@ -84,6 +87,11 @@ private:
     // Callbacks stored for main thread execution
     ExecCallback exec_cb_;
     AskCallback ask_cb_;
+    BreakCallback break_cb_;
+
+    // Break support: allow /break to interrupt running command without killing the server
+    std::atomic<bool> break_requested_{false};
+    std::atomic<bool> executing_{false};
 
     // Forward declaration - impl hides httplib
     class Impl;

@@ -801,6 +801,12 @@ HRESULT CALLBACK agent_impl(PDEBUG_CLIENT Client, PCSTR Args)
             }
         };
 
+        // Create break callback - interrupts currently running debugger command (thread-safe)
+        windbg_agent::BreakCallback break_cb = [&dbg_client]()
+        {
+            dbg_client.SetInterrupt();
+        };
+
         // Start the HTTP server (OS assigns port)
         static windbg_agent::HttpServer http_server;
         if (http_server.is_running())
@@ -810,7 +816,7 @@ HRESULT CALLBACK agent_impl(PDEBUG_CLIENT Client, PCSTR Args)
             control->Release();
             return E_FAIL;
         }
-        int actual_port = http_server.start(exec_cb, ask_cb, bind_addr);
+        int actual_port = http_server.start(exec_cb, ask_cb, break_cb, bind_addr);
         if (actual_port <= 0)
         {
             control->Output(DEBUG_OUTPUT_ERROR,

@@ -220,6 +220,12 @@ bool WinDbgClient::IsInterrupted() const
     return hr == S_OK;
 }
 
+void WinDbgClient::SetInterrupt()
+{
+    if (control_)
+        control_->SetInterrupt(DEBUG_INTERRUPT_ACTIVE);
+}
+
 std::string WinDbgClient::GetTargetState() const
 {
     if (!control_)

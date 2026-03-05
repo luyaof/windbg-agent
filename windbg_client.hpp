@@ -52,6 +52,9 @@ class WinDbgClient
     // Check if user requested interrupt (e.g., Ctrl+C)
     bool IsInterrupted() const;
 
+    // Request interrupt to break the current running command (thread-safe)
+    void SetInterrupt();
+
   private:
     IDebugClient* client_;
     IDebugControl* control_;
