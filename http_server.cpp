@@ -58,6 +58,7 @@ QueueResult HttpServer::queue_and_wait(PendingCommand::Type type, const std::str
 }
 
 int HttpServer::start(ExecCallback exec_cb, AskCallback ask_cb,
+                      BreakCallback break_cb,
                       const std::string& bind_addr) {
     if (running_.load()) {
         return port_;
@@ -65,6 +66,7 @@ int HttpServer::start(ExecCallback exec_cb, AskCallback ask_cb,
 
     exec_cb_ = exec_cb;
     ask_cb_ = ask_cb;
+    break_cb_ = break_cb;
     bind_addr_ = bind_addr;
 
     impl_ = std::make_unique<Impl>();
@@ -139,6 +141,22 @@ int HttpServer::start(ExecCallback exec_cb, AskCallback ask_cb,
         }).detach();
     });
 
+    impl_->server.Post("/break", [this](const httplib::Request&, httplib::Response& res) {
+        if (!executing_.load()) {
+            nlohmann::json response = {{"status", "no_command_running"}, {"success", true}};
+            res.set_content(response.dump(), "application/json");
+            return;
+        }
+
+        break_requested_.store(true);
+        if (break_cb_) {
+            break_cb_();
+        }
+
+        nlohmann::json response = {{"status", "break_requested"}, {"success", true}};
+        res.set_content(response.dump(), "application/json");
+    });
+
     port_ = assigned_port;
     running_.store(true);
 
@@ -159,6 +177,11 @@ void HttpServer::set_interrupt_check(std::function<bool()> check) {
 void HttpServer::wait() {
     while (running_.load()) {
         if (interrupt_check_ && interrupt_check_()) {
+            if (break_requested_.exchange(false)) {
+                // Interrupt was caused by /break — don't shut down, just continue
+                continue;
+            }
+            // Real Ctrl+C — shut down the server
             stop();
             break;
         }
@@ -178,6 +201,7 @@ void HttpServer::wait() {
 
         if (cmd) {
             try {
+                executing_.store(true);
                 if (cmd->type == PendingCommand::Type::Exec && exec_cb_) {
                     cmd->result = exec_cb_(cmd->input);
                 } else if (cmd->type == PendingCommand::Type::Ask && ask_cb_) {
@@ -185,7 +209,9 @@ void HttpServer::wait() {
                 } else {
                     cmd->result = "Error: No handler for command type";
                 }
+                executing_.store(false);
             } catch (const std::exception& e) {
+                executing_.store(false);
                 cmd->result = std::string("Error: ") + e.what();
             }
 
@@ -278,6 +304,7 @@ std::string format_http_info(
     ss << "HTTP API ENDPOINTS:\n";
     ss << "  POST " << url << "/exec   - Execute raw debugger command\n";
     ss << "  POST " << url << "/ask    - AI-assisted query (natural language)\n";
+    ss << "  POST " << url << "/break  - Break currently running command\n";
     ss << "  GET  " << url << "/status - Server status\n";
     ss << "  POST " << url << "/shutdown - Stop server\n\n";
 

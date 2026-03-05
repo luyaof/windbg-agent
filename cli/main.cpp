@@ -41,6 +41,7 @@ void print_usage() {
     std::cerr << "  exec <cmd>       Run debugger command, return raw output\n";
     std::cerr << "  ask <question>   AI-assisted query with reasoning\n";
     std::cerr << "  interactive      Start interactive chat session\n";
+    std::cerr << "  break            Break currently running command\n";
     std::cerr << "  status           Check server status\n";
     std::cerr << "  shutdown         Stop HTTP server\n\n";
     std::cerr << "Config commands (no server required):\n";
@@ -123,6 +124,15 @@ public:
             throw std::runtime_error("Connection failed - is HTTP server running?");
         }
         return res->body;
+    }
+
+    std::string send_break() {
+        auto res = client_->Post("/break", "", "application/json");
+        if (!res) {
+            throw std::runtime_error("Connection failed - is HTTP server running?");
+        }
+        auto json = nlohmann::json::parse(res->body);
+        return json.value("status", "");
     }
 
     void shutdown() {
@@ -347,6 +357,11 @@ int main(int argc, char* argv[]) {
         }
         else if (command == "interactive") {
             run_interactive(client);
+            return 0;
+        }
+        else if (command == "break") {
+            std::string result = client.send_break();
+            std::cout << result << "\n";
             return 0;
         }
         else if (command == "status") {
