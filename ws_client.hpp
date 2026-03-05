@@ -13,12 +13,11 @@ namespace windbg_agent {
 
 // Callbacks for handling requests (same types as http_server/mcp_server)
 using ExecCallback = std::function<std::string(const std::string& command)>;
-using AskCallback = std::function<std::string(const std::string& query)>;
 using BreakCallback = std::function<void()>;
 
 // Internal command structure for cross-thread execution
 struct WsPendingCommand {
-    enum class Type { Exec, Ask };
+    enum class Type { Exec };
     Type type;
     std::string input;
     std::string result;
@@ -55,11 +54,10 @@ public:
     // Returns true if connection established successfully
     bool connect(const std::string& ws_url,
                  ExecCallback exec_cb,
-                 AskCallback ask_cb,
                  BreakCallback break_cb = nullptr);
 
     // Block until disconnected, processing commands on the calling thread
-    // This is where exec_cb and ask_cb get called (on the debugger thread)
+    // This is where exec_cb gets called (on the debugger thread)
     void wait();
 
     // Disconnect from server
@@ -90,9 +88,6 @@ private:
     // Build help/capability response JSON
     std::string build_help_response(int id);
 
-    // Build context response JSON
-    std::string build_context_response(int id);
-
     // Build JSON-RPC error response
     std::string build_error_response(int id, int code, const std::string& message);
 
@@ -121,7 +116,6 @@ private:
 
     // Callbacks stored for main thread execution
     ExecCallback exec_cb_;
-    AskCallback ask_cb_;
     BreakCallback break_cb_;
 
     // Break support

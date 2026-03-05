@@ -982,7 +982,7 @@ HRESULT CALLBACK agent_impl(PDEBUG_CLIENT Client, PCSTR Args)
     {
         // Connect to external WebSocket reverse proxy server
         // Usage: !agent connect <ws_url>
-        // Example: !agent connect ws://proxy.example.com:8080/windbg
+        // Example: !agent connect ws://proxy.example.com:8080/ws
         if (rest.empty())
         {
             control->Output(DEBUG_OUTPUT_ERROR,
@@ -993,8 +993,6 @@ HRESULT CALLBACK agent_impl(PDEBUG_CLIENT Client, PCSTR Args)
         }
 
         windbg_agent::WinDbgClient dbg_client(Client);
-        auto settings = windbg_agent::LoadSettings();
-        auto& session = GetAgentSession();
         std::string target = dbg_client.GetTargetName();
 
         // Parse WebSocket URL
@@ -1024,51 +1022,6 @@ HRESULT CALLBACK agent_impl(PDEBUG_CLIENT Client, PCSTR Args)
             return dbg_client.ExecuteCommand(command);
         };
 
-        // Create ask callback - routes through same AI path as !agent ask
-        windbg_agent::AskCallback ask_cb = [Client, &settings, &session, &dbg_client,
-                                              &target](const std::string& query) -> std::string
-        {
-            auto runtime_ctx = GatherRuntimeContext(dbg_client);
-            std::string error;
-            bool created = false;
-            if (!EnsureAgent(session, dbg_client, settings, target, runtime_ctx, &error, &created))
-            {
-                return error.empty() ? "Failed to initialize agent" : error;
-            }
-
-            try
-            {
-                std::string message =
-                    session.primed || session.system_prompt.empty()
-                        ? query
-                        : (session.system_prompt + "\n\n---\n\n" + query);
-
-                std::string response = session.agent->query_hosted(message, session.host);
-                session.primed = true;
-
-#if !WINDBG_AGENT_DISABLE_SESSIONS
-                const auto* byok_save = settings.get_byok();
-                if (!(byok_save && byok_save->is_usable()))
-                {
-                    std::string new_session_id = session.agent->get_session_id();
-                    std::string provider_name =
-                        libagents::provider_type_name(settings.default_provider);
-                    if (!new_session_id.empty() && new_session_id != session.session_id)
-                    {
-                        windbg_agent::GetSessionStore().SetSessionId(target, provider_name,
-                                                                       new_session_id);
-                        session.session_id = new_session_id;
-                    }
-                }
-#endif
-                return response;
-            }
-            catch (const std::exception& e)
-            {
-                return std::string("Error: ") + e.what();
-            }
-        };
-
         // Create break callback - interrupts currently running debugger command (thread-safe)
         windbg_agent::BreakCallback break_cb = [&dbg_client]()
         {
@@ -1087,7 +1040,7 @@ HRESULT CALLBACK agent_impl(PDEBUG_CLIENT Client, PCSTR Args)
 
         control->Output(DEBUG_OUTPUT_NORMAL, "Connecting to %s...\n", ws_url.c_str());
 
-        if (!ws_client.connect(ws_url, exec_cb, ask_cb, break_cb))
+        if (!ws_client.connect(ws_url, exec_cb, break_cb))
         {
             control->Output(DEBUG_OUTPUT_ERROR,
                             "Failed to connect to %s\n", ws_url.c_str());

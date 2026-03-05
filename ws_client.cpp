@@ -43,7 +43,6 @@ WsClient::~WsClient() {
 
 bool WsClient::connect(const std::string& ws_url,
                         ExecCallback exec_cb,
-                        AskCallback ask_cb,
                         BreakCallback break_cb) {
     if (connected_.load()) {
         return false;  // Already connected
@@ -56,7 +55,6 @@ bool WsClient::connect(const std::string& ws_url,
 
     url_ = ws_url;
     exec_cb_ = exec_cb;
-    ask_cb_ = ask_cb;
     break_cb_ = break_cb;
     should_stop_.store(false);
 
@@ -223,19 +221,13 @@ std::string WsClient::handle_jsonrpc_request(const std::string& message) {
     Json params = req.value("params", Json::object());
 
     // Route by method
-    if (method == "help") {
-        return build_help_response(id);
-    }
-    else if (method == "ping") {
+    if (method == "ping") {
         Json response = {
             {"jsonrpc", "2.0"},
             {"id", id},
             {"result", {{"status", "ok"}}}
         };
         return response.dump();
-    }
-    else if (method == "get_context") {
-        return build_context_response(id);
     }
     else if (method == "break") {
         if (!executing_.load()) {
@@ -262,7 +254,8 @@ std::string WsClient::handle_jsonrpc_request(const std::string& message) {
     else if (method == "exec") {
         std::string command = params.value("command", "");
         if (command.empty()) {
-            return build_error_response(id, -32602, "Invalid params: missing 'command'");
+            // Empty command = discovery/help request (used by ws-proxy)
+            return build_help_response(id);
         }
 
         auto result = queue_and_wait(WsPendingCommand::Type::Exec, command);
@@ -270,20 +263,6 @@ std::string WsClient::handle_jsonrpc_request(const std::string& message) {
             {"jsonrpc", "2.0"},
             {"id", id},
             {"result", {{"output", result.payload}, {"success", result.success}}}
-        };
-        return response.dump();
-    }
-    else if (method == "ask") {
-        std::string query = params.value("query", "");
-        if (query.empty()) {
-            return build_error_response(id, -32602, "Invalid params: missing 'query'");
-        }
-
-        auto result = queue_and_wait(WsPendingCommand::Type::Ask, query);
-        Json response = {
-            {"jsonrpc", "2.0"},
-            {"id", id},
-            {"result", {{"response", result.payload}, {"success", result.success}}}
         };
         return response.dump();
     }
@@ -314,21 +293,8 @@ std::string WsClient::build_help_response(int id) {
             }}
         },
         {
-            {"name", "ask"},
-            {"description", "Ask the AI debugging assistant a natural language question about the current debug session"},
-            {"params", {
-                {"query", {{"type", "string"}, {"required", true},
-                    {"description", "Natural language question (e.g., 'what caused this crash?')"}}}
-            }}
-        },
-        {
             {"name", "break"},
             {"description", "Interrupt a currently running debugger command"},
-            {"params", Json::object()}
-        },
-        {
-            {"name", "get_context"},
-            {"description", "Get current debug session context information"},
             {"params", Json::object()}
         },
         {
@@ -355,33 +321,6 @@ std::string WsClient::build_help_response(int id) {
             {"protocol", "jsonrpc-2.0-over-websocket"},
             {"commands", commands},
             {"session_info", session_info}
-        }}
-    };
-
-    return response.dump();
-}
-
-// ---------------------------------------------------------------------------
-// build_context_response
-// ---------------------------------------------------------------------------
-
-std::string WsClient::build_context_response(int id) {
-    SessionContext ctx;
-    {
-        std::lock_guard<std::mutex> lock(context_mutex_);
-        ctx = session_context_;
-    }
-
-    Json response = {
-        {"jsonrpc", "2.0"},
-        {"id", id},
-        {"result", {
-            {"target_name", ctx.target_name},
-            {"target_arch", ctx.target_arch},
-            {"debugger_type", ctx.debugger_type},
-            {"target_state", ctx.target_state},
-            {"pid", ctx.pid},
-            {"version", ctx.version}
         }}
     };
 
@@ -453,8 +392,6 @@ void WsClient::wait() {
                 executing_.store(true);
                 if (cmd->type == WsPendingCommand::Type::Exec && exec_cb_) {
                     cmd->result = exec_cb_(cmd->input);
-                } else if (cmd->type == WsPendingCommand::Type::Ask && ask_cb_) {
-                    cmd->result = ask_cb_(cmd->input);
                 } else {
                     cmd->result = "Error: No handler for command type";
                 }
@@ -559,14 +496,11 @@ std::string format_ws_info(
     ss << "Server: " << ws_url << "\n\n";
 
     ss << "PROTOCOL: JSON-RPC 2.0 over WebSocket\n";
-    ss << "The server can send requests to this WinDbg session.\n\n";
+    ss << "The server can send requests to this client session.\n\n";
 
-    ss << "SUPPORTED METHODS (server -> WinDbg):\n";
-    ss << "  help         - Get supported commands and session info\n";
+    ss << "SUPPORTED METHODS (server -> client):\n";
     ss << "  exec         - Execute a debugger command\n";
-    ss << "  ask          - AI-assisted query (natural language)\n";
     ss << "  break        - Interrupt a running command\n";
-    ss << "  get_context  - Get debug session context\n";
     ss << "  ping         - Heartbeat / keepalive\n";
 
     return ss.str();
