@@ -20,15 +20,7 @@ struct WsPendingCommand {
     enum class Type { Exec };
     Type type;
     std::string input;
-    std::string result;
-    bool completed = false;
-    std::mutex* done_mutex = nullptr;
-    std::condition_variable* done_cv = nullptr;
-};
-
-struct WsQueueResult {
-    bool success;
-    std::string payload;
+    int request_id = 0;
 };
 
 // Context info sent in help/get_context responses
@@ -77,7 +69,7 @@ public:
 
 private:
     // Queue a command for execution on the main thread (called from recv thread)
-    WsQueueResult queue_and_wait(WsPendingCommand::Type type, const std::string& input);
+    void queue_command(WsPendingCommand::Type type, const std::string& input, int request_id);
 
     // WebSocket receive thread
     void receive_loop();
@@ -93,9 +85,6 @@ private:
 
     // Send a message over WebSocket (thread-safe)
     void send_message(const std::string& message);
-
-    // Complete all pending commands with error (shutdown path)
-    void complete_pending_commands(const std::string& result);
 
     // Attempt reconnection with exponential backoff
     bool try_reconnect();

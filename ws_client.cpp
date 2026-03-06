@@ -83,7 +83,15 @@ void WsClient::disconnect() {
     should_stop_.store(true);
     connected_.store(false);
     queue_cv_.notify_all();
-    complete_pending_commands("Error: WebSocket disconnected");
+
+    // Drain and free heap-allocated pending commands
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        while (!pending_commands_.empty()) {
+            delete pending_commands_.front();
+            pending_commands_.pop();
+        }
+    }
 
     if (impl_ && impl_->ws) {
         std::lock_guard<std::mutex> lock(send_mutex_);
@@ -113,40 +121,20 @@ void WsClient::set_interrupt_check(std::function<bool()> check) {
 }
 
 // ---------------------------------------------------------------------------
-// queue_and_wait — called from recv thread, blocks until main thread processes
+// queue_command — called from recv thread, returns immediately (non-blocking)
 // ---------------------------------------------------------------------------
 
-WsQueueResult WsClient::queue_and_wait(WsPendingCommand::Type type, const std::string& input) {
-    if (!connected_.load()) {
-        return {false, "Error: WebSocket is not connected"};
-    }
-
-    WsPendingCommand cmd;
-    cmd.type = type;
-    cmd.input = input;
-    cmd.completed = false;
-
-    std::mutex done_mutex;
-    std::condition_variable done_cv;
-    cmd.done_mutex = &done_mutex;
-    cmd.done_cv = &done_cv;
+void WsClient::queue_command(WsPendingCommand::Type type, const std::string& input, int request_id) {
+    auto* cmd = new WsPendingCommand();
+    cmd->type = type;
+    cmd->input = input;
+    cmd->request_id = request_id;
 
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
-        pending_commands_.push(&cmd);
+        pending_commands_.push(cmd);
     }
     queue_cv_.notify_one();
-
-    {
-        std::unique_lock<std::mutex> lock(done_mutex);
-        done_cv.wait(lock, [&]() { return cmd.completed || !connected_.load(); });
-    }
-
-    if (!cmd.completed) {
-        return {false, "Error: WebSocket disconnected"};
-    }
-
-    return {true, cmd.result};
 }
 
 // ---------------------------------------------------------------------------
@@ -258,13 +246,8 @@ std::string WsClient::handle_jsonrpc_request(const std::string& message) {
             return build_help_response(id);
         }
 
-        auto result = queue_and_wait(WsPendingCommand::Type::Exec, command);
-        Json response = {
-            {"jsonrpc", "2.0"},
-            {"id", id},
-            {"result", {{"output", result.payload}, {"success", result.success}}}
-        };
-        return response.dump();
+        queue_command(WsPendingCommand::Type::Exec, command, id);
+        return "";  // Response sent later by main thread
     }
     else {
         return build_error_response(id, -32601,
@@ -388,26 +371,30 @@ void WsClient::wait() {
         }
 
         if (cmd) {
+            std::string output;
+            bool success = false;
+
             try {
                 executing_.store(true);
                 if (cmd->type == WsPendingCommand::Type::Exec && exec_cb_) {
-                    cmd->result = exec_cb_(cmd->input);
+                    output = exec_cb_(cmd->input);
+                    success = true;
                 } else {
-                    cmd->result = "Error: No handler for command type";
+                    output = "Error: No handler for command type";
                 }
                 executing_.store(false);
             } catch (const std::exception& e) {
                 executing_.store(false);
-                cmd->result = std::string("Error: ") + e.what();
+                output = std::string("Error: ") + e.what();
             }
 
-            if (cmd->done_mutex && cmd->done_cv) {
-                {
-                    std::lock_guard<std::mutex> lock(*cmd->done_mutex);
-                    cmd->completed = true;
-                }
-                cmd->done_cv->notify_one();
-            }
+            Json response = {
+                {"jsonrpc", "2.0"},
+                {"id", cmd->request_id},
+                {"result", {{"output", output}, {"success", success}}}
+            };
+            send_message(response.dump());
+            delete cmd;
         }
     }
 
@@ -415,35 +402,6 @@ void WsClient::wait() {
     if (recv_thread_.joinable()) {
         should_stop_.store(true);
         recv_thread_.join();
-    }
-}
-
-// ---------------------------------------------------------------------------
-// complete_pending_commands — drain queue on shutdown
-// ---------------------------------------------------------------------------
-
-void WsClient::complete_pending_commands(const std::string& result) {
-    std::queue<WsPendingCommand*> pending;
-    {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        std::swap(pending, pending_commands_);
-    }
-
-    while (!pending.empty()) {
-        WsPendingCommand* cmd = pending.front();
-        pending.pop();
-        if (!cmd || !cmd->done_mutex || !cmd->done_cv) {
-            continue;
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(*cmd->done_mutex);
-            if (!cmd->completed) {
-                cmd->result = result;
-                cmd->completed = true;
-            }
-        }
-        cmd->done_cv->notify_one();
     }
 }
 
